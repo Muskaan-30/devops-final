@@ -1,11 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  This script deploys the entire Wild Rydes web infrastructure using code. 
-  It creates a reliable, scalable setup using ECS Fargate, 
-  sitting behind a public Application Load Balancer. It also includes 
-  the necessary container registry (ECR) for the CI/CD pipeline to push images.
+  Final Complete Solution for Wild Rydes: Highly Available ECS Fargate Infrastructure
+  with integrated CI/CD Pipeline (CodePipeline, CodeBuild, CodeDeploy).
 
-# --- Parameters ---
+# --- Parameters (User Input) ---
 Parameters:
   VpcCIDR:
     Description: CIDR block for the VPC
@@ -13,22 +11,22 @@ Parameters:
     Default: 10.0.0.0/16
   
   PublicSubnetACIDR:
-    Description: These blocks are for the public-facing side (Load Balancers, NAT Gateways).
+    Description: CIDR block for Public Subnet A (ALB/NAT Gateway)
     Type: String
     Default: 10.0.1.0/24
     
   PublicSubnetBCIDR:
-    Description: These blocks are for the public-facing side (Load Balancers, NAT Gateways).
+    Description: CIDR block for Public Subnet B (ALB/NAT Gateway)
     Type: String
     Default: 10.0.2.0/24
 
   PrivateSubnetACIDR:
-    Description: These blocks are private, where our secure application containers will run.
+    Description: CIDR block for Private Subnet A (ECS Fargate Tasks)
     Type: String
     Default: 10.0.3.0/24
     
   PrivateSubnetBCIDR:
-    Description: These blocks are private, where our secure application containers will run.
+    Description: CIDR block for Private Subnet B (ECS Fargate Tasks)
     Type: String
     Default: 10.0.4.0/24
 
@@ -38,17 +36,17 @@ Parameters:
     Default: latest
 
   ContainerPort:
-    Description: Which port does the code inside our Docker container use?
+    Description: Which port does the code inside our Docker container use? (Set to 80 for Nginx test image)
     Type: Number
-    Default: 8080
+    Default: 80
 
   TaskCPU:
-    Description: How much processing power (vCPU) should each running application container get
+    Description: Fargate Task CPU Units (e.g., 1024 = 1 vCPU)
     Type: Number
     Default: 1024 
 
   TaskMemory:
-    Description: How much memory should each running application container get
+    Description: Fargate Task Memory MiB (e.g., 2048 = 2 GB)
     Type: Number
     Default: 2048 
 
@@ -70,7 +68,7 @@ Mappings:
 # --- Resources ---
 Resources:
 
-  # 1. NETWORKING - VPC, Subnets (Public/Private), IGW, NAT Gateway, Route Tables
+  # 1. NETWORKING - VPC, Subnets, IGW, NAT Gateway, Route Tables
 
   VPC:
     Type: AWS::EC2::VPC
@@ -82,7 +80,6 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-VPC"
   
-  # Internet Gateway to get into the network
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
@@ -96,7 +93,6 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # We need two public subnets A and B in two different zones 
   PublicSubnetA:
     Type: AWS::EC2::Subnet
     Properties:
@@ -119,7 +115,6 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-PublicSubnetB"
 
-  # We need two private subnets A and B in two different zones
   PrivateSubnetA:
     Type: AWS::EC2::Subnet
     Properties:
@@ -140,7 +135,6 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-PrivateSubnetB"
 
-  # We need a NAT Gateway for private applications to fetch updates.
   NatGatewayEIP:
     Type: AWS::EC2::EIP
     Properties:
@@ -155,7 +149,6 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-NATGateway"
           
-  # Set up the route tables so traffic knows where to go
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -199,9 +192,8 @@ Resources:
       RouteTableId: !Ref PrivateRouteTable
 
 
-  # 2. IAM ROLES - Execution and Task Roles for ECS Fargate
+  # 2. IAM ROLES - Execution and Task Roles for ECS Fargate and CI/CD
 
-  # This is the security badge ECS needs to pull the image and send logs.
   ECSTaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -214,7 +206,6 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
 
-  # This is the security badge application code uses to talk to other AWS services.
   ECSTaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -235,7 +226,8 @@ Resources:
                   - dynamodb:PutItem
                 Resource: "*"
 
-    # NEW: IAM Role for CodePipeline to Orchestrate Workflow
+  # CodePipeline IAM Roles (Corrected for deployment stability)
+
   CodePipelineRole:
     Type: AWS::IAM::Role
     Properties:
@@ -281,7 +273,6 @@ Resources:
                   - iam:PassRole
                 Resource: "*"
 
-  # NEW: IAM Role for CodeBuild to Build and Push Docker Image
   CodeBuildRole:
     Type: AWS::IAM::Role
     Properties:
@@ -301,7 +292,8 @@ Resources:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${CodeBuildProject}*"
+                # Corrected: Using generic resource ARN to break the circular dependency loop
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
               - Effect: Allow
                 Action:
                   - s3:GetObject
@@ -310,7 +302,7 @@ Resources:
                 Resource: 
                   - !Sub "arn:aws:s3:::${PipelineArtifactBucket}"
                   - !Sub "arn:aws:s3:::${PipelineArtifactBucket}/*"
-              - Effect: Allow # Required for Docker login and push to ECR
+              - Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
                   - ecr:BatchCheckLayerAvailability
@@ -319,7 +311,7 @@ Resources:
                   - ecr:CompleteLayerUpload
                   - ecr:PutImage
                 Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/wildrydes-app-repo"
-              - Effect: Allow # Needed for CodeDeploy deployment
+              - Effect: Allow
                 Action:
                   - ecs:DescribeServices
                   - ecs:CreateTaskSet
@@ -330,7 +322,6 @@ Resources:
 
   # 3. SECURITY GROUPS - For ALB and Fargate Tasks
 
-  # A firewall rule for the Load Balancer, allowing anyone from the internet in on port 80.
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -345,7 +336,6 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-ALB-SG"
 
-  # A firewall rule for the running applications. It only allows traffic that came directly from the Load Balancer.
   ECSTaskSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -362,7 +352,6 @@ Resources:
 
   # 4. LOAD BALANCER - ALB, Listener, Target Group
 
-  # The Application Load Balancer is the public entrance.
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -376,7 +365,6 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-ALB"
 
-  # The Target Group tells the Load Balancer where the applications are running.
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -394,7 +382,7 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-TargetGroup"
 
-  # The Listener checks for connections (on port 80) and sends them to the Target Group.
+  # FIX: Listener explicitly waits for ALB and Target Group stability (Fixes Race Condition)
   ALBListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     DependsOn: 
@@ -410,10 +398,10 @@ Resources:
 
   # 5. CONTAINER SERVICE - ECR, Cluster, Task Definition, Service, Logs
 
-  # The private Docker registry where the CI/CD pipeline will store the built images.
+  # ECR Repository: Set to Retain to handle previous deployment conflicts
   ECRRepository:
     Type: AWS::ECR::Repository
-    DeletionPolicy: Retain # IMPORTANT: Keeps the repo if the stack fails or is deleted.
+    DeletionPolicy: Retain
     Properties:
       RepositoryName: wildrydes-app-repo
       ImageScanningConfiguration:
@@ -422,20 +410,17 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-ECRRepo"
 
-  # This is the logical group where application tasks run.
   ECSCluster:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: !Sub "${AWS::StackName}-Cluster"
 
-  # Set up where we want logs to go and how long to keep them.
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/ecs/${AWS::StackName}-app"
       RetentionInDays: 7 
 
-  # The blueprint (Task Definition) for our application.
   ECSTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -449,8 +434,6 @@ Resources:
       TaskRoleArn: !GetAtt ECSTaskRole.Arn
       ContainerDefinitions:
         - Name: wildrydes-container
-          # The image URI is dynamically built using the ECR repo just created.
-          # Inside ECSTaskDefinition -> ContainerDefinitions:
           Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}:${ContainerTag}"
           PortMappings:
             - ContainerPort: !Ref ContainerPort
@@ -461,7 +444,7 @@ Resources:
               awslogs-region: !Ref "AWS::Region"
               awslogs-stream-prefix: ecs
 
-  # The running Service manages the application: keeps the right number of tasks alive and handles updates.
+  # FIX: ECS Service explicitly waits for the stable ALB Listener (Fixes Race Condition)
   ECSService:
     Type: AWS::ECS::Service
     DependsOn: ALBListener
@@ -472,7 +455,7 @@ Resources:
       DesiredCount: !Ref DesiredCount
       LaunchType: FARGATE
       DeploymentConfiguration: 
-        DeploymentCircuitBreaker: # Enables automatic rollback on failure
+        DeploymentCircuitBreaker: 
           Enable: true
           Rollback: true
       NetworkConfiguration:
@@ -493,9 +476,7 @@ Resources:
 
 
   # 6. AUTOSCALING & MONITORING - Scalable Target, Scaling Policy, Alarms
-  
 
-  # Define the minimum (2) and maximum (6) number of containers the service can run.
   ECSAutoScaleTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     Properties:
@@ -506,7 +487,6 @@ Resources:
       ServiceNamespace: ecs
       RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
 
-  # Create the rule: If the average CPU usage goes above 70%, add more containers.
   ECSScalingPolicyUp:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
     Properties:
@@ -520,7 +500,6 @@ Resources:
         ScaleOutCooldown: 60
         ScaleInCooldown: 60
 
-  # Set up an alarm to alert if the CPU is consistently high. Used by the CI/CD pipeline for deployment checks.
   HighCPUAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -539,14 +518,14 @@ Resources:
       Threshold: 70 
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+
   # 7. S3 ARTIFACT BUCKET
-# Must be globally unique for CodePipeline
-# --------------------
+
   PipelineArtifactBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Delete # Set to Retain if you want to keep data
+    DeletionPolicy: Delete 
     Properties:
-      BucketName: !Sub "${AWS::StackName}-${AWS::Region}-${AWS::AccountId}-artifacts" # Provide a globally unique name
+      BucketName: !Sub "${AWS::StackName}-${AWS::Region}-${AWS::AccountId}-artifacts"
       VersioningConfiguration:
         Status: Enabled
       BucketEncryption:
@@ -554,11 +533,8 @@ Resources:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
 
-# --- NEW SECTION ---
-# 8. CI/CD TOOLCHAIN - CodeBuild and CodePipeline
-# -----------------------------------------------
+  # 8. CI/CD TOOLCHAIN - CodeBuild and CodePipeline
 
-  # CodeBuild Project: Builds the Docker image and pushes it to ECR
   CodeBuildProject:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -568,9 +544,8 @@ Resources:
         Type: CODEPIPELINE
       Environment:
         ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/standard:5.0 # Latest standard image
+        Image: aws/codebuild/standard:5.0
         Type: LINUX_CONTAINER
-        # Passes ECR URI to CodeBuild environment for push command
         EnvironmentVariables:
           - Name: AWS_ACCOUNT_ID
             Value: !Ref AWS::AccountId
@@ -579,12 +554,11 @@ Resources:
           - Name: IMAGE_REPO_NAME
             Value: wildrydes-app-repo 
           - Name: IMAGE_TAG
-            Value: latest # CodeBuild will push with this tag
+            Value: latest 
       Source:
         Type: CODEPIPELINE
-        BuildSpec: buildspec.yml
-          
-  # CodePipeline: Orchestrates the entire CI/CD workflow
+        BuildSpec: buildspec.yml # Uses the buildspec.yml file committed to GitHub
+            
   ApplicationCodePipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
@@ -594,7 +568,6 @@ Resources:
         Type: S3
         Location: !Ref PipelineArtifactBucket
       Stages:
-        # 1. Source Stage: Pulls code from GitHub
         - Name: Source
           Actions:
             - Name: GitHubSource
@@ -606,13 +579,11 @@ Resources:
               OutputArtifacts:
                 - Name: SourceArtifact
               Configuration:
-                Owner: Muskaan-30 
-                Repo: devops-final
-                Branch: main 
-                # Requires a GitHub Personal Access Token stored in Secrets Manager
-                ConnectionArn: arn:aws:codeconnections:us-east-1:075737418482:connection/c9751c51-b799-4c88-b10b-cf7086934e6d # Use Connection ARN for modern GitHub integration
+                Owner: [GITHUB_OWNER] 
+                Repo: [GITHUB_REPO] 
+                Branch: [GITHUB_BRANCH] 
+                ConnectionArn: [CONNECTION_ARN] # MUST be replaced with your CodeStar Connection ARN
                 
-        # 2. Build Stage: Builds Docker image and creates imagedefinitions.json
         - Name: Build
           Actions:
             - Name: BuildDockerImage
@@ -628,7 +599,6 @@ Resources:
               Configuration:
                 ProjectName: !Ref CodeBuildProject
 
-        # 3. Deploy Stage: Updates the ECS Service
         - Name: Deploy
           Actions:
             - Name: DeployToECS
@@ -643,9 +613,8 @@ Resources:
                 ClusterName: !Ref ECSCluster
                 ServiceName: !GetAtt ECSService.Name
                 FileName: imagedefinitions.json
-                # This uses the HighCPUAlarm defined in Section 6 to validate success
                 DeploymentTimeoutInMinutes: 20
-                ApplicationName: !Ref HighCPUAlarm # Placeholder/Example of how an alarm is used in pipeline
+                ApplicationName: !Ref HighCPUAlarm 
 
 # --- Outputs ---
 Outputs:
